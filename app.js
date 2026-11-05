@@ -5,6 +5,7 @@
 
 /* ---------- Grundlagen ---------- */
 const KEY = "stetig.v1";
+const APP_VERSION = 9;
 const WD = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 const WD_LONG = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
@@ -81,7 +82,17 @@ function cleanDay(d) {
   }
   if (d.note !== undefined) d.note = String(d.note).slice(0, 500);
   if (d.pause !== undefined && !PAUSE_REASONS[d.pause]) delete d.pause;
-  if (d.snap) d.snap = { p: numbers(d.snap.p, 5), m: numbers(d.snap.m, 5) };
+  if (d.ctx !== undefined) d.ctx = String(d.ctx).slice(0, 200);
+  if (d.ai !== undefined) {
+    const score = Number(d.ai && d.ai.score);
+    if (score >= 1 && score <= 10) d.ai = { score: Math.round(score * 2) / 2, text: String(d.ai.text || "").slice(0, 400), sig: String(d.ai.sig || "") };
+    else delete d.ai;
+  }
+  if (d.snap) {
+    const o = {};
+    Object.keys(d.snap.o || {}).forEach(id => { o[id] = String(d.snap.o[id]).slice(0, 40); });
+    d.snap = { p: numbers(d.snap.p, 5), m: numbers(d.snap.m, 5), b: numbers(d.snap.b, 5), o };
+  }
 }
 
 function normalize(s) {
@@ -98,6 +109,8 @@ function normalize(s) {
   s.habits.forEach(h => {
     h.points = clamp(Number(h.points) || 1, 1, 5);
     h.weekly = clamp(Number(h.weekly) || 0, 0, 6);
+    h.flex = !!h.flex && !h.weekly;
+    h.group = typeof h.group === "string" ? h.group.slice(0, 40) : "";
     h.minutes = clamp(Number(h.minutes) || 0, 0, 240);
     h.time = ["morgens", "tags", "abends"].includes(h.time) ? h.time : "";
     h.days = Array.isArray(h.days) && h.days.length ? h.days : ALL_DAYS.slice();
@@ -280,27 +293,42 @@ const isSkipped = (k, id) => !!(S.days[k] && S.days[k].skip && S.days[k].skip[id
 
 /* Vergangene Tage behalten ihren Plan und ihre Punkte. Spätere Änderungen an Habits schreiben sie nicht um. */
 const snapOf = k => (k !== todayKey() && S.days[k] && S.days[k].snap) || null;
-const plusPoints = (h, k) => { const s = snapOf(k); return s && h.id in s.p ? s.p[h.id] : h.points; };
+const plusPoints = (h, k) => {
+  const s = snapOf(k);
+  if (s && h.id in s.p) return s.p[h.id];
+  if (s && s.b && h.id in s.b) return s.b[h.id];
+  return h.points;
+};
+/* Bonus-Habits (Sport, große Projekte): Sie geben Punkte, wenn du sie machst, und kosten nichts, wenn nicht. */
+const isBonus = h => h.weekly > 0 || h.flex;
 const minusPoints = (h, k) => { const s = snapOf(k); return s && s.m && h.id in s.m ? s.m[h.id] : h.points; };
 
 const isDone = (k, id) => !!(S.days[k] && S.days[k].done && S.days[k].done[id]);
 
 function plusShown(k) {
   const s = snapOf(k);
-  if (s) return S.habits.filter(h => h.type === "plus" && (h.id in s.p || (h.weekly && h.from <= k && notArchived(h, k))));
-  return S.habits.filter(h => h.type === "plus" && notArchived(h, k) && scheduled(h, k));
+  if (s) return S.habits.filter(h => h.type === "plus" && (h.id in s.p || (s.b && h.id in s.b) || (isBonus(h) && h.from <= k && notArchived(h, k))));
+  return S.habits.filter(h => h.type === "plus" && notArchived(h, k) && (isBonus(h) || scheduled(h, k)));
 }
-/* Wochenziele zählen nur an Tagen, an denen du sie gemacht hast. Ob das Ziel erreicht ist, zeigt die Woche. */
+/* plusCounted sind die Pflicht-Habits eines Tages. Nur sie bilden die 10 Punkte des Tagesplans. */
 function countsOn(h, k) {
-  if (isSkipped(k, h.id)) return false;
-  if (h.weekly) return isDone(k, h.id);
+  if (isSkipped(k, h.id) || isBonus(h)) return false;
   return !!snapOf(k) || h.from <= k;
 }
 const plusCounted = k => plusShown(k).filter(h => countsOn(h, k));
+const bonusDone = k => plusShown(k).filter(h => isBonus(h) && isDone(k, h.id));
+
+/* Entweder-oder: Habits einer Gruppe teilen sich einen Platz im Tagesplan. Eines davon reicht. */
+const groupOf = (h, k) => { const s = snapOf(k); return s && s.o ? s.o[h.id] || "" : h.group; };
+const groupPeers = (h, k) => {
+  const g = groupOf(h, k);
+  return g ? S.habits.filter(x => x.id !== h.id && groupOf(x, k) === g) : [];
+};
+const slotDone = (h, k) => isDone(k, h.id) || groupPeers(h, k).some(x => isDone(k, x.id));
 const minusShown = k => S.habits.filter(h => h.type === "minus" && notArchived(h, k));
 
 function plannedOn(h, k) {
-  if (h.weekly) return false;
+  if (isBonus(h)) return false;
   const s = snapOf(k);
   if (s) return h.id in s.p;
   return h.from <= k && scheduled(h, k) && notArchived(h, k);
@@ -327,38 +355,82 @@ function writeSnap(k) {
   if (!hasEntry(k)) { delete d.snap; return; }
   const isToday = k === todayKey();
   const old = (!isToday && d.snap) || { p: {}, m: {} };
-  const p = Object.assign({}, old.p), m = {};
-  plusShown(k).filter(h => h.from <= k && (!h.weekly || isDone(k, h.id))).forEach(h => { if (!(h.id in p)) p[h.id] = h.points; });
-  S.habits.filter(h => h.weekly && !isDone(k, h.id)).forEach(h => { delete p[h.id]; });
+  const p = Object.assign({}, old.p), m = {}, b = {};
+  plusShown(k).filter(h => h.from <= k && !isBonus(h)).forEach(h => { if (!(h.id in p)) p[h.id] = h.points; });
+  S.habits.filter(h => isBonus(h)).forEach(h => {
+    delete p[h.id];
+    if (isDone(k, h.id)) b[h.id] = old.b && h.id in old.b ? old.b[h.id] : h.points;
+  });
+  const o = Object.assign({}, old.o);
+  S.habits.forEach(h => { if (h.group && !(h.id in o)) o[h.id] = h.group; });
   S.habits.filter(h => h.type === "minus" && d.minus && d.minus[h.id] > 0)
     .forEach(h => { m[h.id] = h.id in (old.m || {}) ? old.m[h.id] : h.points; });
-  d.snap = { p, m };
+  d.snap = { p, m, b, o };
 }
 
 function ensureSnaps() {
   const today = todayKey();
-  Object.keys(S.days).forEach(k => { if (k < today && !S.days[k].snap && hasEntry(k)) writeSnap(k); });
+  const moveOld = !S.settings.bonusSnapFixed;
+  S.settings.bonusSnapFixed = true;
+  Object.keys(S.days).forEach(k => {
+    const d = S.days[k];
+    if (moveOld && k < today && d.snap) {
+      /* Alte Tage: Wochen-Habits aus dem Pflichtplan in den Bonus verschieben. */
+      S.habits.filter(h => isBonus(h) && h.id in d.snap.p).forEach(h => {
+        d.snap.b = d.snap.b || {};
+        if (isDone(k, h.id)) d.snap.b[h.id] = d.snap.p[h.id];
+        delete d.snap.p[h.id];
+      });
+    }
+    if (k < today && !d.snap && hasEntry(k)) writeSnap(k);
+  });
+  migrateRhythm();
+}
+
+/* Einmalig: Sport und Ähnliches aus der Bibliothek war als tägliche Pflicht angelegt. */
+function migrateRhythm() {
+  if (S.settings.rhythmFixed) return;
+  S.settings.rhythmFixed = true;
+  S.habits.forEach(h => {
+    const r = h.type === "plus" && !isBonus(h) && h.from !== "2000-01-01" ? libraryRhythm(h.name) : 0;
+    if (r === "f") h.flex = true;
+    else if (r) h.weekly = r;
+    if (r) { h.days = ALL_DAYS.slice(); S.habitsT = Date.now(); }
+  });
 }
 
 function hasEntry(k) {
   const d = S.days[k];
   if (!d) return false;
-  return Object.values(d.done || {}).some(Boolean) || Object.values(d.minus || {}).some(v => v > 0);
+  return !!d.ai || Object.values(d.done || {}).some(Boolean) || Object.values(d.minus || {}).some(v => v > 0);
 }
 
 function calc(k) {
   const d = S.days[k] || { done: {}, minus: {} };
   const plan = plusCounted(k);
-  const possible = plan.reduce((a, h) => a + plusPoints(h, k), 0);
-  const earned = plan.reduce((a, h) => a + (d.done && d.done[h.id] ? plusPoints(h, k) : 0), 0);
+  let possible = 0, core = 0;
+  const slots = {};
+  plan.forEach(h => {
+    const pts = plusPoints(h, k), g = groupOf(h, k);
+    if (!g) { possible += pts; if (isDone(k, h.id)) core += pts; return; }
+    const slot = slots[g] || (slots[g] = { max: 0, done: false });
+    slot.max = Math.max(slot.max, pts);
+    slot.done = slot.done || isDone(k, h.id);
+  });
+  Object.values(slots).forEach(s => { possible += s.max; if (s.done) core += s.max; });
+  const bonus = bonusDone(k).reduce((a, h) => a + plusPoints(h, k), 0);
+  const earned = core + bonus;
   const minus = S.habits.filter(h => h.type === "minus")
     .reduce((a, h) => a + minusPoints(h, k) * ((d.minus && d.minus[h.id]) || 0), 0);
-  let score = null;
+  let habitScore = null;
   if (hasEntry(k) && !isPaused(k)) {
     const base = possible ? 1 + 9 * earned / possible : 10;
-    score = Math.round(clamp(base - MINUS_STEP * minus, 1, 10) * 10) / 10;
+    habitScore = Math.round(clamp(base - MINUS_STEP * minus, 1, 10) * 10) / 10;
   }
-  return { possible, earned, minus, score };
+  /* Hat die KI den Tag bewertet, zählt ihre feste Note. Sonst der Wert aus den Habits. */
+  const aiScore = !isPaused(k) && d.ai ? d.ai.score : null;
+  const score = aiScore !== null ? aiScore : habitScore;
+  return { possible, earned, core, bonus, minus, score, habitScore, aiScore };
 }
 
 const tier = s => s === null ? "" : s < 4 ? "t1" : s < 6 ? "t2" : s < 8 ? "t3" : "t4";
@@ -404,7 +476,7 @@ function yesterdayMissed() {
 
 function habitStreak(h) {
   const start = firstDay();
-  if (!start) return 0;
+  if (!start || h.flex) return 0;
   const today = todayKey();
   let n = 0, missed = false;
   if (h.weekly) {
@@ -423,7 +495,7 @@ function habitStreak(h) {
   let k = today;
   for (let i = 0; i < 1500 && k >= start; i++, k = addDays(k, -1)) {
     if (isPaused(k) || isSkipped(k, h.id) || !plannedOn(h, k)) continue;
-    if (isDone(k, h.id)) { n++; missed = false; }
+    if (slotDone(h, k)) { n++; missed = false; }
     else if (k !== today) {
       if (missed) break;
       missed = true;
@@ -453,7 +525,7 @@ function constancy(h, keys) {
   const start = firstDay();
   const today = todayKey();
   let planned = 0, done = 0;
-  if (!start) return { planned, done };
+  if (!start || h.flex) return { planned, done };
   if (h.weekly) {
     const current = mondayOf(today);
     [...new Set(keys.map(mondayOf))].filter(m => m >= mondayOf(start) && m >= mondayOf(h.from)).forEach(m => {
@@ -466,7 +538,7 @@ function constancy(h, keys) {
   }
   keys.forEach(k => {
     if (k < start || isPaused(k) || isSkipped(k, h.id) || !plannedOn(h, k)) return;
-    const did = !!(S.days[k] && S.days[k].done && S.days[k].done[h.id]);
+    const did = slotDone(h, k);
     if (k === today && !did) return;
     planned++;
     if (did) done++;
@@ -570,10 +642,13 @@ function plusRow(h, k) {
   const skipped = isSkipped(k, h.id);
   const st = habitStreak(h);
   const pts = plusPoints(h, k);
-  const week = h.weekly ? `${weekCount(h, k)} von ${weekTarget(h, k)} diese Woche` : "";
+  const week = h.weekly ? `${weekCount(h, k)} von ${weekTarget(h, k)} diese Woche · +${pts}` : h.flex ? `Bonus +${pts}` : "";
   const flow = h.weekly ? (st >= 2 ? ` · ${st} Wochen` : "") : (st >= 2 ? ` · ${st} in Folge` : "");
-  const sub = skipped ? "Frei, zählt nicht" : `${week || `+${pts} ${pts === 1 ? "Punkt" : "Punkte"}`}${flow}`;
-  const cls = `row ${done ? "is-done" : ""} ${skipped ? "is-skip" : ""} ${V.popId === h.id ? "is-pop" : ""}`;
+  const peers = groupPeers(h, k);
+  const altDone = !done && peers.find(x => isDone(k, x.id));
+  const orText = peers.length ? ` · oder ${peers.map(x => esc(x.name)).join(", ")}` : "";
+  const sub = skipped ? "Frei, zählt nicht" : altDone ? `Erledigt durch ${esc(altDone.name)}` : `${week || `+${pts} ${pts === 1 ? "Punkt" : "Punkte"}`}${flow}${orText}`;
+  const cls = `row ${done ? "is-done" : ""} ${altDone ? "is-alt" : ""} ${skipped ? "is-skip" : ""} ${V.popId === h.id ? "is-pop" : ""}`;
   const main = `${ico(h)}<span class="row-main"><span class="row-name">${esc(h.name)}</span><span class="row-sub">${sub}</span></span>`;
   const mins = (S.days[k] && S.days[k].mins && S.days[k].mins[h.id]) || 0;
   if (done && h.minutes && !V.skipMode) {
@@ -616,16 +691,24 @@ function viewToday() {
   const allDone = isAllDone(k);
   const pct = c.score === null ? 0 : (c.score - 1) / 9 * 100;
   const st = streak();
-  const active = plus.filter(h => !isSkipped(k, h.id) && (!h.weekly || isDone(k, h.id)));
-  const doneShown = active.filter(h => d.done && d.done[h.id]).length;
+  const coreList = plus.filter(h => !isBonus(h));
+  const bonusList = plus.filter(isBonus);
+  const slotKey = h => groupOf(h, k) || h.id;
+  const active = coreList.filter(h => !isSkipped(k, h.id));
+  const slotTotal = new Set(active.map(slotKey)).size;
+  const doneShown = new Set(active.filter(h => slotDone(h, k)).map(slotKey)).size;
   const groups = [["morgens", "Morgens"], ["tags", "Tagsüber"], ["abends", "Abends"], ["", "Jederzeit"]];
-  const grouped = plus.some(h => h.time);
+  const grouped = coreList.some(h => h.time);
   const planHtml = grouped
     ? groups.map(([id, label]) => {
-        const rows = plus.filter(h => h.time === id);
+        const rows = coreList.filter(h => h.time === id);
         return rows.length ? `<h3 class="group-label">${label}</h3>${rows.map(h => plusRow(h, k)).join("")}` : "";
       }).join("")
-    : plus.map(h => plusRow(h, k)).join("");
+    : coreList.map(h => plusRow(h, k)).join("");
+  const bonusHtml = bonusList.length ? `<details class="fold" ${bonusList.some(h => isDone(k, h.id)) ? "open" : ""}>
+      <summary>Bonus, wenn es passt</summary>
+      <div class="list">${bonusList.map(h => plusRow(h, k)).join("")}</div>
+    </details>` : "";
   const now = new Date();
   const evening = !isToday || now.getHours() >= 18 || now.getHours() < S.settings.dayStart;
   const goal = S.settings.weeks[mondayOf(k)];
@@ -645,26 +728,28 @@ function viewToday() {
       <div class="hero-bar"><button class="btn is-small" data-a="endPause">Pause beenden</button></div>
     </section>` : `<section class="hero ${allDone ? "is-done" : ""} ${V.popHero ? "is-pop" : ""}" id="hero" aria-label="Tageswert">
       <div>
-        <div class="eyebrow">Tageswert</div>
+        <div class="eyebrow">${c.aiScore !== null ? "KI-Wert" : "Tageswert"}</div>
         ${c.score === null ? `<div class="hero-word">Offen</div>` : `<div class="hero-score">${fmt(c.score)}<small>/10</small></div>`}
         <div class="hero-msg">${heroMessage(k, c, allDone)}</div>
       </div>
       ${mascot(c.score)}
       <div class="hero-bar">
         <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="Fortschritt"><i style="width:${pct}%"></i></div>
-        <div class="hero-points"><span>+${c.earned} von ${c.possible}</span>${c.minus ? `<span>−${c.minus} Minuspunkte</span>` : ""}</div>
+        <div class="hero-points"><span>+${c.core} von ${c.possible}</span>${c.aiScore !== null && c.habitScore !== null ? `<span>Habits ${fmt(c.habitScore)}</span>` : ""}${c.bonus ? `<span>+${c.bonus} Bonus</span>` : ""}${c.minus ? `<span>−${c.minus} Minus</span>` : ""}</div>
       </div>
     </section>`;
 
   const lists = paused ? "" : `<section class="section">
       <div class="section-head"><h2>${isToday ? "Das steht an" : "Das stand an"}</h2>
-        <div class="section-tools"><span>${doneShown} von ${active.length}</span><button class="link" data-a="skipMode">${V.skipMode ? "Fertig" : "Frei nehmen"}</button></div></div>
+        <div class="section-tools"><span>${doneShown} von ${slotTotal}</span><button class="link" data-a="skipMode">${V.skipMode ? "Fertig" : "Frei nehmen"}</button></div></div>
       ${V.skipMode ? `<p class="section-note">Tippe auf alles, was an diesem Tag nicht zählen soll.</p>` : ""}
       <div class="list">
         ${planHtml || `<p class="hint">Für diesen Tag ist nichts geplant.</p>`}
         <button class="add" data-a="newHabit" data-type="plus">+ Habit hinzufügen</button>
       </div>
     </section>
+
+    ${bonusHtml}
 
     <section class="section">
       <div class="section-head"><h2>Minuspunkte</h2><span>${c.minus ? "−" + c.minus : "0"}</span></div>
@@ -715,6 +800,7 @@ function reflectCard(k, isToday, d, r) {
         <label for="note">Notiz zum Tag</label>
         <textarea class="note" id="note" maxlength="500" placeholder="Was lief gut? Was machst du morgen anders?">${esc(d.note || "")}</textarea>
       </div>
+      ${aiDayCard(k, d)}
     </section>`;
 }
 
@@ -808,7 +894,7 @@ function viewHistory() {
     ${skillsPanel()}
     ${insightsPanel()}
     <section class="panel"><h3>Konstanz je Habit</h3>
-      ${stats.sort((a, b) => (b.c.done / (b.c.planned || 1)) - (a.c.done / (a.c.planned || 1))).map(({ h, c }) => {
+      ${stats.filter(s => s.c.planned).sort((a, b) => (b.c.done / (b.c.planned || 1)) - (a.c.done / (a.c.planned || 1))).map(({ h, c }) => {
         const p = c.planned ? Math.round(c.done / c.planned * 100) : 0;
         return `<div class="stat-row">${ico(h, true)}<span class="stat-name">${esc(h.name)}</span><span class="stat-val">${c.done} von ${c.planned}</span>
           <div class="bar on-card" role="progressbar" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(h.name)}: ${p} Prozent"><i style="width:${p}%"></i></div></div>`;
@@ -830,6 +916,7 @@ function viewHistory() {
 /* ---------- Habits verwalten ---------- */
 function dayLabel(h) {
   if (h.weekly) return `${h.weekly}× pro Woche`;
+  if (h.flex) return "Bonus, ohne Ziel";
   if (h.days.length === 7) return "Jeden Tag";
   const s = [...h.days].sort((a, b) => MON_FIRST.indexOf(a) - MON_FIRST.indexOf(b));
   if (s.join() === "1,2,3,4,5") return "Mo bis Fr";
@@ -838,12 +925,15 @@ function dayLabel(h) {
 }
 
 function manageRow(h, list, i) {
-  const pts = h.type === "plus" ? `+${h.points} · ${dayLabel(h)}` : `−${h.points} je Mal`;
+  const peers = S.habits.filter(x => h.group && x.group === h.group && x.id !== h.id && !x.archived);
+  const pts = h.type === "plus" ? `+${h.points} · ${dayLabel(h)}${peers.length ? ` · oder ${peers.map(x => esc(x.name)).join(", ")}` : ""}` : `−${h.points} je Mal`;
+  const flip = h.type === "plus" ? `<button class="pill kind" data-a="flipKind" data-id="${h.id}" aria-label="${esc(h.name)} zu ${isBonus(h) ? "Pflicht" : "Bonus"} machen">${isBonus(h) ? "Zu Pflicht" : "Zu Bonus"}</button>` : "";
   return `<div class="row is-plain">
     <button class="row-open" data-a="edit" data-id="${h.id}" aria-label="${esc(h.name)} bearbeiten">
       ${ico(h)}
       <span class="row-main"><span class="row-name">${esc(h.name)}</span><span class="row-sub">${pts}</span></span>
     </button>
+    ${flip}
     <span class="row-tools">
       <button data-a="move" data-id="${h.id}" data-n="-1" ${i === 0 ? "disabled" : ""} aria-label="${esc(h.name)} nach oben">${chevron("up")}</button>
       <button data-a="move" data-id="${h.id}" data-n="1" ${i === list.length - 1 ? "disabled" : ""} aria-label="${esc(h.name)} nach unten">${chevron("down")}</button>
@@ -864,17 +954,27 @@ function installPanel() {
 function markBackup() { S.settings.lastBackup = todayKey(); touchHabits(); }
 
 function viewManage() {
-  const plus = S.habits.filter(h => h.type === "plus" && !h.archived);
+  const plus = S.habits.filter(h => h.type === "plus" && !h.archived && !isBonus(h));
+  const bonus = S.habits.filter(h => h.type === "plus" && !h.archived && isBonus(h));
   const minus = S.habits.filter(h => h.type === "minus" && !h.archived);
+  const today = todayKey();
+  const dailyPoints = calc(today).possible;
   const where = cloud.on ? (window.claude ? "Gespeichert in deinem Claude-Konto. Handy und PC zeigen denselben Stand." : "Gespeichert auf diesem Gerät und in deinem Konto. Alle Geräte zeigen denselben Stand.") : hasDisk ? "Gespeichert auf diesem Gerät. Mach ab und zu eine Sicherung." : "Dieser Browser erlaubt kein Speichern. Einträge gehen beim Schließen verloren.";
   return `<div class="page">
     <header class="top"><div class="brand">${LOGO}Stetig</div></header>
     <div class="headline"><h1>Habits</h1><p>Was zählt, entscheidest du.</p></div>
 
     <section class="section">
-      <div class="section-head"><h2>Pluspunkte</h2><span>${plus.length}</span></div>
+      <div class="section-head"><h2>Pflicht</h2><span>${dailyPoints} Punkte heute</span></div>
+      <p class="section-note">Das zählt jeden Tag fest. ${plus.length > 5 ? "Mehr als 5 macht eine gute Note schwer. Stell den Rest auf Bonus." : "3 bis 5 Habits sind ideal."}</p>
       <div class="list">${plus.map((h, i) => manageRow(h, plus, i)).join("")}
       <button class="add" data-a="newHabit" data-type="plus">+ Habit hinzufügen</button></div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Bonus</h2><span>${bonus.length}</span></div>
+      <p class="section-note">Bringt Extrapunkte und kostet nie etwas.</p>
+      <div class="list">${bonus.map((h, i) => manageRow(h, bonus, i)).join("") || `<p class="hint">Noch keine Bonus-Habits. In der Bibliothek findest du über 200 Ideen.</p>`}</div>
     </section>
 
     <section class="section">
@@ -890,7 +990,8 @@ function viewManage() {
       <summary>Tageswert und Serie</summary>
       <section class="panel">
       <h3>So zählt der Tageswert</h3>
-      <p class="panel-note">Alle geplanten Pluspunkte ergeben 10, keine ergeben 1. Jeder Minuspunkt zieht 0,9 ab, an jedem Tag gleich viel. Dein Fazit von 1 bis 10 steht getrennt daneben. Vergangene Tage behalten ihren Wert, auch wenn du später Punkte änderst.</p>
+      <p class="panel-note">Lässt du den Tag von der KI bewerten, zählt ihre Note als Tageswert. Sie berücksichtigt, was los war, und vergleicht mit deinen letzten Tagen. Ohne KI-Bewertung gilt der Wert aus den Habits:</p>
+      <p class="panel-note">Alle Pflicht-Habits des Tages ergeben 10, keine ergeben 1. Bei Entweder-oder reicht eines. Bonus-Habits wie Sport geben Extrapunkte und kosten nichts, wenn du sie auslässt. So kannst du Lücken ausgleichen, mehr als 10 geht nicht. Jeder Minuspunkt zieht 0,9 ab, an jedem Tag gleich viel. Dein Fazit von 1 bis 10 steht getrennt daneben. Vergangene Tage behalten ihren Wert, auch wenn du später Punkte änderst.</p>
       <div class="setting"><span class="stat-name">Serie zählt ab Tageswert</span>
         <span class="stepper"><button class="step" data-a="thr" data-n="-1" ${S.settings.threshold <= 2 ? "disabled" : ""} aria-label="Grenze senken">−</button><span class="count">${S.settings.threshold}</span><button class="step" data-a="thr" data-n="1" ${S.settings.threshold >= 9 ? "disabled" : ""} aria-label="Grenze erhöhen">+</button></span>
       </div>
@@ -922,24 +1023,58 @@ function viewManage() {
       ${installPanel()}
       ${reminderPanel()}
     </details>
+    <p class="hint" id="appVersion">Stetig Version ${APP_VERSION}</p>
   </div>`;
 }
 
 /* ---------- Bottom Sheets ---------- */
+function altField() {
+  const others = S.habits.filter(h => h.type === "plus" && !h.archived && h.id !== sheet.editId);
+  if (!others.length) return "";
+  const alts = sheet.draft.alts;
+  return `<div class="field"><span class="label">Entweder-oder mit</span>
+    <div class="chips" role="group">${others.map(h => `<button class="pill" data-a="draftAlt" data-n="${h.id}" aria-pressed="${alts.includes(h.id)}">${esc(h.name)}</button>`).join("")}</div>
+    <p class="hint">Du machst eines davon, und der Platz im Tag ist voll. Beides zählt nicht doppelt.</p></div>`;
+}
+
+/* Macht ein Habit zum Teil einer Entweder-oder-Gruppe. Alle Mitglieder bekommen dieselbe Art. */
+function applyGroup(h, alts) {
+  const old = h.group;
+  S.habits.forEach(x => { if (old && x.group === old && x.id !== h.id && !alts.includes(x.id)) x.group = ""; });
+  if (!alts.length) h.group = "";
+  else {
+    const members = alts.map(id => S.habits.find(x => x.id === id)).filter(Boolean);
+    const gid = old || members.map(x => x.group).find(Boolean) || "g" + uid();
+    h.group = gid;
+    members.forEach(x => {
+      const prior = x.group;
+      S.habits.forEach(y => { if (prior && y.group === prior) y.group = gid; });
+      x.group = gid;
+      x.weekly = h.weekly;
+      x.flex = h.flex;
+      x.days = h.days.slice();
+    });
+  }
+  const counts = {};
+  S.habits.filter(x => x.group && !x.archived).forEach(x => { counts[x.group] = (counts[x.group] || 0) + 1; });
+  S.habits.forEach(x => { if (x.group && (counts[x.group] || 0) < 2) x.group = ""; });
+}
+
 function habitSheet() {
   const d = sheet.draft;
   const isPlus = d.type === "plus";
   const title = sheet.editId ? "Bearbeiten" : isPlus ? "Neues Habit" : "Neuer Minuspunkt";
   return `<div class="sheet-head"><h2 id="sheetTitle">${title}</h2><button class="close" data-a="close" aria-label="Schließen">×</button></div>
-    ${sheet.editId ? "" : `<button class="btn is-ghost is-small" data-a="library" data-type="${d.type}">Aus der Bibliothek wählen</button>`}
-    <div class="field"><label for="hName">Name</label>
+    ${sheet.editId ? "" : `<button class="btn is-ghost is-small" data-a="library" data-type="${d.type}">Aus der Bibliothek wählen</button>`}    <div class="field"><label for="hName">Name</label>
       <input class="input" id="hName" maxlength="40" autocomplete="off" value="${esc(d.name)}" placeholder="${isPlus ? "Zum Beispiel: Gitarre üben" : "Zum Beispiel: Handy im Bett"}"></div>
     ${sheet.editId ? "" : `<div class="chips" aria-label="Vorschläge">${SUGGEST[d.type].map(s => `<button class="pill" data-a="suggest" data-s="${esc(s)}">${esc(s)}</button>`).join("")}</div>`}
     <div class="field"><span class="label">${isPlus ? "Pluspunkte" : "Minuspunkte je Mal"}</span>
       <div class="points ${isPlus ? "" : "is-minus"}" role="group">${[1, 2, 3, 4, 5].map(n => `<button data-a="draftPts" data-n="${n}" aria-pressed="${d.points === n}">${isPlus ? "+" : "−"}${n}</button>`).join("")}</div></div>
     ${isPlus ? `<div class="field"><span class="label">Rhythmus</span>
-      <div class="seg" role="group"><button data-a="draftWeekly" data-n="0" aria-pressed="${!d.weekly}">Feste Tage</button><button data-a="draftWeekly" data-n="${d.weekly || 3}" aria-pressed="${!!d.weekly}">Pro Woche</button></div></div>
-    ${d.weekly ? `<div class="field"><span class="label">Wie oft pro Woche</span>
+      <div class="seg" role="group"><button data-a="draftWeekly" data-n="0" aria-pressed="${!d.weekly && !d.flex}">Pflicht</button><button data-a="draftWeekly" data-n="${d.weekly || 3}" aria-pressed="${!!d.weekly}">Pro Woche</button><button data-a="draftFlex" aria-pressed="${!!d.flex}">Bonus</button></div>
+      <p class="hint">${d.flex ? "Ohne Ziel. Bringt Punkte, wenn du es machst, und kostet nie etwas." : d.weekly ? "Für Sport und Ähnliches. Bringt Punkte, wenn du es machst. Tage ohne kosten nichts." : "Zählt an den gewählten Tagen fest zum Tagesplan."}</p></div>
+    ${altField()}
+    ${d.flex ? "" : d.weekly ? `<div class="field"><span class="label">Wie oft pro Woche</span>
       <div class="days weekly" role="group">${[1, 2, 3, 4, 5, 6].map(n => `<button data-a="draftWeekly" data-n="${n}" aria-pressed="${d.weekly === n}">${n}×</button>`).join("")}</div></div>`
     : `<div class="field"><span class="label">An diesen Tagen</span>
       <div class="days" role="group">${MON_FIRST.map(n => `<button data-a="draftDay" data-n="${n}" aria-pressed="${d.days.includes(n)}">${WD[n]}</button>`).join("")}</div></div>`}
@@ -1051,14 +1186,13 @@ function confetti() {
 
 /* ---------- Aktionen ---------- */
 function isAllDone(k) {
-  const plus = plusCounted(k);
-  const d = S.days[k] || {};
-  return !isPaused(k) && plus.length > 0 && plus.every(h => d.done && d.done[h.id]) && calc(k).minus === 0;
+  const c = calc(k);
+  return !isPaused(k) && c.possible > 0 && c.core >= c.possible && c.minus === 0;
 }
 
 function emptyDraft(type) {
   const used = S.habits.filter(h => !h.archived).length;
-  return { type, name: "", points: type === "plus" ? 2 : 1, days: ALL_DAYS.slice(), icon: type === "plus" ? "star" : "stop", color: type === "plus" ? COLORS[used % 6] : "pink", weekly: 0, time: "", minutes: 0 };
+  return { type, name: "", points: type === "plus" ? 2 : 1, days: ALL_DAYS.slice(), icon: type === "plus" ? "star" : "stop", color: type === "plus" ? COLORS[used % 6] : "pink", weekly: 0, flex: false, time: "", minutes: 0, alts: [] };
 }
 
 const actions = {
@@ -1118,6 +1252,11 @@ const actions = {
       day.done[d.id] = 1;
       if (day.skip) delete day.skip[d.id];
       if (h && h.minutes) { day.mins = day.mins || {}; day.mins[d.id] = h.minutes; }
+      /* Entweder-oder: Es zählt immer nur eine Wahl. */
+      if (h) groupPeers(h, k).forEach(x => {
+        delete day.done[x.id];
+        if (day.mins) delete day.mins[x.id];
+      });
       if (h && k < h.from) { h.from = k; S.habitsT = Date.now(); }
       if (navigator.vibrate) navigator.vibrate(12);
     }
@@ -1152,7 +1291,7 @@ const actions = {
   edit(d) {
     const h = S.habits.find(x => x.id === d.id);
     if (!h) return;
-    sheet = { mode: "habit", editId: h.id, draft: { type: h.type, name: h.name, points: h.points, days: h.days.slice(), icon: h.icon, color: h.color, weekly: h.weekly, time: h.time, minutes: h.minutes } };
+    sheet = { mode: "habit", editId: h.id, draft: { type: h.type, name: h.name, points: h.points, days: h.days.slice(), icon: h.icon, color: h.color, weekly: h.weekly, flex: h.flex, time: h.time, minutes: h.minutes, alts: S.habits.filter(x => h.group && x.group === h.group && x.id !== h.id && !x.archived).map(x => x.id) } };
     renderSheet();
   },
   close() { closeSheet(); },
@@ -1160,7 +1299,26 @@ const actions = {
   draftPts(d) { syncDraft(); sheet.draft.points = Number(d.n); renderSheet(); },
   draftIcon(d) { syncDraft(); sheet.draft.icon = d.n; renderSheet(); },
   draftColor(d) { syncDraft(); sheet.draft.color = d.n; renderSheet(); },
-  draftWeekly(d) { syncDraft(); sheet.draft.weekly = Number(d.n); renderSheet(); },
+  draftWeekly(d) { syncDraft(); sheet.draft.weekly = Number(d.n); sheet.draft.flex = false; renderSheet(); },
+  draftFlex() { syncDraft(); sheet.draft.weekly = 0; sheet.draft.flex = true; renderSheet(); },
+  draftAlt(d) {
+    syncDraft();
+    const alts = sheet.draft.alts;
+    sheet.draft.alts = alts.includes(d.n) ? alts.filter(x => x !== d.n) : alts.concat(d.n);
+    renderSheet();
+  },
+  flipKind(d) {
+    const h = S.habits.find(x => x.id === d.id);
+    if (!h) return;
+    const toPflicht = isBonus(h);
+    const peers = S.habits.filter(x => h.group && x.group === h.group);
+    (peers.length ? peers : [h]).forEach(x => {
+      x.flex = !toPflicht;
+      x.weekly = 0;
+    });
+    touchHabits();
+    render();
+  },
   draftTime(d) { syncDraft(); sheet.draft.time = d.n; renderSheet(); },
   draftMinutes(d) { syncDraft(); sheet.draft.minutes = Number(d.n); renderSheet(); },
   draftDay(d) {
@@ -1174,13 +1332,19 @@ const actions = {
     const dr = sheet.draft;
     dr.name = dr.name.trim();
     if (!dr.name) { sheet.err = "Gib deinem Habit einen Namen."; renderSheet(); return; }
-    if (dr.type === "plus" && !dr.weekly && !dr.days.length) { sheet.err = "Wähle mindestens einen Tag."; renderSheet(); return; }
-    if (dr.weekly) dr.days = ALL_DAYS.slice();
+    if (dr.type === "plus" && !isBonus(dr) && !dr.days.length) { sheet.err = "Wähle mindestens einen Tag."; renderSheet(); return; }
+    if (isBonus(dr)) dr.days = ALL_DAYS.slice();
+    const alts = dr.alts || [];
+    let saved;
     if (sheet.editId) {
-      Object.assign(S.habits.find(x => x.id === sheet.editId), { name: dr.name, points: dr.points, days: dr.days, icon: dr.icon, color: dr.color, weekly: dr.weekly, time: dr.time, minutes: dr.minutes });
+      saved = S.habits.find(x => x.id === sheet.editId);
+      Object.assign(saved, { name: dr.name, points: dr.points, days: dr.days, icon: dr.icon, color: dr.color, weekly: dr.weekly, flex: dr.flex, time: dr.time, minutes: dr.minutes });
     } else {
-      S.habits.push(Object.assign({ id: uid(), from: todayKey(), archived: null }, dr));
+      const { alts: _unused, ...fields } = dr;
+      saved = Object.assign({ id: uid(), from: todayKey(), archived: null, group: "" }, fields);
+      S.habits.push(saved);
     }
+    if (saved.type === "plus") applyGroup(saved, alts);
     touchHabits();
     closeSheet();
   },
@@ -1193,13 +1357,14 @@ const actions = {
       const today = todayKey();
       const doneToday = S.days[today] && S.days[today].done && S.days[today].done[h.id];
       h.archived = doneToday ? addDays(today, 1) : today;
+      applyGroup(h, []);
       touchHabits();
     }
     closeSheet();
   },
   move(d) {
     const h = S.habits.find(x => x.id === d.id);
-    const peers = S.habits.filter(x => x.type === h.type && !x.archived);
+    const peers = S.habits.filter(x => x.type === h.type && !x.archived && isBonus(x) === isBonus(h));
     const other = peers[peers.indexOf(h) + Number(d.n)];
     if (!other) return;
     const a = S.habits.indexOf(h), b = S.habits.indexOf(other);
@@ -1326,6 +1491,7 @@ document.addEventListener("click", e => {
 
 document.addEventListener("input", e => {
   if (e.target.id === "weekGoal") { setWeekGoal(e.target.value); return; }
+  if (e.target.id === "dayCtx") { dayOf(V.day).ctx = e.target.value.slice(0, 200); touchDay(V.day); return; }
   if (e.target.id === "libSearch" && sheet) { sheet.q = e.target.value; renderLibraryList(); return; }
   if (e.target.id !== "note") return;
   dayOf(V.day).note = e.target.value;
@@ -1333,6 +1499,7 @@ document.addEventListener("input", e => {
 });
 
 document.addEventListener("change", e => {
+  if (e.target.id === "aiDayMinus") { S.settings.aiMinus = e.target.checked; touchHabits(); return; }
   if (e.target.id !== "bkFile" || !e.target.files[0]) return;
   const reader = new FileReader();
   reader.onload = () => { sheet.text = String(reader.result || ""); sheet.msg = "Datei geladen. Tippe auf Einlesen."; sheet.err = ""; renderSheet(); };

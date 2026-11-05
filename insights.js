@@ -81,7 +81,7 @@ function collectInsights() {
       const d = S.days[k], r = d.rating;
       if (h.type === "plus") {
         if (isDone(k, h.id)) yes.push(r);
-        else if (plannedOn(h, k) || h.weekly) no.push(r);
+        else if (plannedOn(h, k) || isBonus(h)) no.push(r);
       } else if (d.minus && d.minus[h.id] > 0) yes.push(r);
       else no.push(r);
     });
@@ -160,7 +160,9 @@ function libraryRows() {
   return rows.map(r => {
     const added = names.has(r[0].toLowerCase());
     const isMinus = r[1] === "Weniger";
-    const sub = isMinus ? `−${r[4]} je Mal` : `+${r[4]}${r[2] ? ` · ${r[2]} Min` : ""}`;
+    const rhythm = libraryRhythm(r[0]);
+    const label = rhythm ? ` · Bonus, ${rhythm}× pro Woche` : " · Bonus";
+    const sub = isMinus ? `−${r[4]} je Mal` : `+${r[4]}${r[2] ? ` · ${r[2]} Min` : ""}${label}`;
     return `<div class="lib-row"><span class="row-main"><span class="row-name">${esc(r[0])}</span><span class="row-sub">${sub}</span></span>
       <button class="step ${added ? "" : "is-add"}" data-a="libAdd" data-n="${esc(r[0])}" ${added ? "disabled" : ""} aria-label="${esc(r[0])} ${added ? "ist schon dabei" : "hinzufügen"}">${added ? "✓" : "+"}</button></div>`;
   }).join("") || `<p class="hint">Nichts gefunden. Leg das Habit einfach selbst an.</p>`;
@@ -196,17 +198,20 @@ Object.assign(window.EXTRA_ACTIONS, {
     touchDay(V.day);
     closeSheet();
   },
-  library(d) { sheet = { mode: "library", area: d.type === "minus" ? "Weniger" : "Körper", q: "" }; renderSheet(); },
+  library(d) { sheet = { mode: "library", area: d.type === "minus" ? "Weniger" : "Sport", q: "" }; renderSheet(); },
   libArea(d) { sheet.area = d.n; sheet.q = ""; renderSheet(); },
   libAdd(d) {
     const r = HABIT_LIBRARY.find(x => x[0] === d.n);
     if (!r) return;
     const isMinus = r[1] === "Weniger";
     const used = S.habits.filter(h => !h.archived).length;
+    /* Aus der Bibliothek kommt alles als Bonus. Zur Pflicht wird ein Habit nur bewusst. */
+    const rhythm = isMinus ? 0 : libraryRhythm(r[0]);
+    const weekly = typeof rhythm === "number" ? rhythm : 0;
     S.habits.push({
       id: uid(), type: isMinus ? "minus" : "plus", name: r[0], points: r[4], icon: r[3],
       color: isMinus ? "pink" : COLORS[used % 6], days: ALL_DAYS.slice(), from: todayKey(), archived: null,
-      weekly: 0, time: isMinus ? "" : r[5], minutes: r[2]
+      weekly, flex: !isMinus && !weekly, group: "", time: isMinus ? "" : r[5], minutes: r[2]
     });
     touchHabits();
     renderLibraryList();
