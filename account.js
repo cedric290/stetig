@@ -289,6 +289,6 @@ function backupDue() {
 
 function reminderPanel() {
   return `<section class="panel"><h3>Tägliche Erinnerung am iPhone</h3>
-    <p class="panel-note">Das geht ohne Server. Öffne die App Kurzbefehle und tippe auf Automation, dann auf Neue Automation. Wähle Tageszeit, zum Beispiel 21:00, täglich und Sofort ausführen. Füge die Aktion Mitteilung anzeigen hinzu, mit dem Text: Zeit für dein Fazit in Stetig.</p>
+    <p class="panel-note">Das geht ohne Server. Öffne die App Kurzbefehle und tippe auf Automation, dann auf Neue Automation. Wähle Tageszeit, zum Beispiel 21:00, täglich und Sofort ausführen. Füge die Aktion Mitteilung anzeigen hinzu, mit dem Text: Zeit für deine Habits.</p>
   </section>`;
 }

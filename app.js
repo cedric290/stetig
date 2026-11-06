@@ -5,15 +5,14 @@
 
 /* ---------- Grundlagen ---------- */
 const KEY = "stetig.v1";
-const APP_VERSION = 9;
+const APP_VERSION = 11;
 const WD = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 const WD_LONG = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
 const MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
 const MON_FIRST = [1, 2, 3, 4, 5, 6, 0];
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 const COLORS = ["sun", "orange", "green", "blue", "pink", "violet", "indigo"];
-const DEFAULT_SETTINGS = { threshold: 5, dayStart: 3, weeks: {} };
-const MINUS_STEP = 0.9; /* So viel zieht jeder Minuspunkt vom Tageswert ab, an jedem Tag gleich. */
+const DEFAULT_SETTINGS = { dayStart: 3, weeks: {} };
 const PAUSE_REASONS = { krank: "Krank", urlaub: "Urlaub", frei: "Freier Tag" };
 
 const SUGGEST = {
@@ -100,14 +99,12 @@ function normalize(s) {
   s.habitsT = s.habitsT || 0;
   s.resetT = s.resetT || 0;
   s.settings.weeks = s.settings.weeks || {};
-  s.settings.threshold = clamp(Number(s.settings.threshold) || 5, 2, 9);
   s.settings.dayStart = clamp(Number(s.settings.dayStart) || 0, 0, 6);
   Object.keys(s.days).forEach(k => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !s.days[k] || typeof s.days[k] !== "object") { delete s.days[k]; return; }
     cleanDay(s.days[k]);
   });
   s.habits.forEach(h => {
-    h.points = clamp(Number(h.points) || 1, 1, 5);
     h.weekly = clamp(Number(h.weekly) || 0, 0, 6);
     h.flex = !!h.flex && !h.weekly;
     h.group = typeof h.group === "string" ? h.group.slice(0, 40) : "";
@@ -293,16 +290,8 @@ const isSkipped = (k, id) => !!(S.days[k] && S.days[k].skip && S.days[k].skip[id
 
 /* Vergangene Tage behalten ihren Plan und ihre Punkte. Spätere Änderungen an Habits schreiben sie nicht um. */
 const snapOf = k => (k !== todayKey() && S.days[k] && S.days[k].snap) || null;
-const plusPoints = (h, k) => {
-  const s = snapOf(k);
-  if (s && h.id in s.p) return s.p[h.id];
-  if (s && s.b && h.id in s.b) return s.b[h.id];
-  return h.points;
-};
-/* Bonus-Habits (Sport, große Projekte): Sie geben Punkte, wenn du sie machst, und kosten nichts, wenn nicht. */
+/* Ohne feste Tage: Wochenziele und Habits, die man macht, wenn es passt. */
 const isBonus = h => h.weekly > 0 || h.flex;
-const minusPoints = (h, k) => { const s = snapOf(k); return s && s.m && h.id in s.m ? s.m[h.id] : h.points; };
-
 const isDone = (k, id) => !!(S.days[k] && S.days[k].done && S.days[k].done[id]);
 
 function plusShown(k) {
@@ -310,16 +299,14 @@ function plusShown(k) {
   if (s) return S.habits.filter(h => h.type === "plus" && (h.id in s.p || (s.b && h.id in s.b) || (isBonus(h) && h.from <= k && notArchived(h, k))));
   return S.habits.filter(h => h.type === "plus" && notArchived(h, k) && (isBonus(h) || scheduled(h, k)));
 }
-/* plusCounted sind die Pflicht-Habits eines Tages. Nur sie bilden die 10 Punkte des Tagesplans. */
+/* plusCounted sind die Habits mit festen Tagen. */
 function countsOn(h, k) {
   if (isSkipped(k, h.id) || isBonus(h)) return false;
   return !!snapOf(k) || h.from <= k;
 }
 const plusCounted = k => plusShown(k).filter(h => countsOn(h, k));
-const bonusDone = k => plusShown(k).filter(h => isBonus(h) && isDone(k, h.id));
-
 /* Entweder-oder: Habits einer Gruppe teilen sich einen Platz im Tagesplan. Eines davon reicht. */
-const groupOf = (h, k) => { const s = snapOf(k); return s && s.o ? s.o[h.id] || "" : h.group; };
+const groupOf = () => ""; /* Entweder-oder ist in der einfachen App aus. Alte Gruppen bleiben gespeichert. */
 const groupPeers = (h, k) => {
   const g = groupOf(h, k);
   return g ? S.habits.filter(x => x.id !== h.id && groupOf(x, k) === g) : [];
@@ -356,15 +343,15 @@ function writeSnap(k) {
   const isToday = k === todayKey();
   const old = (!isToday && d.snap) || { p: {}, m: {} };
   const p = Object.assign({}, old.p), m = {}, b = {};
-  plusShown(k).filter(h => h.from <= k && !isBonus(h)).forEach(h => { if (!(h.id in p)) p[h.id] = h.points; });
+  plusShown(k).filter(h => h.from <= k && !isBonus(h)).forEach(h => { p[h.id] = 1; });
   S.habits.filter(h => isBonus(h)).forEach(h => {
     delete p[h.id];
-    if (isDone(k, h.id)) b[h.id] = old.b && h.id in old.b ? old.b[h.id] : h.points;
+    if (isDone(k, h.id)) b[h.id] = 1;
   });
   const o = Object.assign({}, old.o);
   S.habits.forEach(h => { if (h.group && !(h.id in o)) o[h.id] = h.group; });
   S.habits.filter(h => h.type === "minus" && d.minus && d.minus[h.id] > 0)
-    .forEach(h => { m[h.id] = h.id in (old.m || {}) ? old.m[h.id] : h.points; });
+    .forEach(h => { m[h.id] = 1; });
   d.snap = { p, m, b, o };
 }
 
@@ -405,73 +392,10 @@ function hasEntry(k) {
   return !!d.ai || Object.values(d.done || {}).some(Boolean) || Object.values(d.minus || {}).some(v => v > 0);
 }
 
-function calc(k) {
-  const d = S.days[k] || { done: {}, minus: {} };
-  const plan = plusCounted(k);
-  let possible = 0, core = 0;
-  const slots = {};
-  plan.forEach(h => {
-    const pts = plusPoints(h, k), g = groupOf(h, k);
-    if (!g) { possible += pts; if (isDone(k, h.id)) core += pts; return; }
-    const slot = slots[g] || (slots[g] = { max: 0, done: false });
-    slot.max = Math.max(slot.max, pts);
-    slot.done = slot.done || isDone(k, h.id);
-  });
-  Object.values(slots).forEach(s => { possible += s.max; if (s.done) core += s.max; });
-  const bonus = bonusDone(k).reduce((a, h) => a + plusPoints(h, k), 0);
-  const earned = core + bonus;
-  const minus = S.habits.filter(h => h.type === "minus")
-    .reduce((a, h) => a + minusPoints(h, k) * ((d.minus && d.minus[h.id]) || 0), 0);
-  let habitScore = null;
-  if (hasEntry(k) && !isPaused(k)) {
-    const base = possible ? 1 + 9 * earned / possible : 10;
-    habitScore = Math.round(clamp(base - MINUS_STEP * minus, 1, 10) * 10) / 10;
-  }
-  /* Hat die KI den Tag bewertet, zählt ihre feste Note. Sonst der Wert aus den Habits. */
-  const aiScore = !isPaused(k) && d.ai ? d.ai.score : null;
-  const score = aiScore !== null ? aiScore : habitScore;
-  return { possible, earned, core, bonus, minus, score, habitScore, aiScore };
-}
-
-const tier = s => s === null ? "" : s < 4 ? "t1" : s < 6 ? "t2" : s < 8 ? "t3" : "t4";
-const dayClass = (k, score) => isPaused(k) ? "is-pause" : tier(score);
-
-function missedDay(k, first) {
-  return !!first && k >= first && k < todayKey() && !isPaused(k) && !hasEntry(k) && plusCounted(k).length > 0;
-}
-
 function firstDay() {
   let first = null;
   Object.keys(S.days).forEach(k => { if (hasEntry(k) && (!first || k < first)) first = k; });
   return first;
-}
-
-function streak() {
-  const first = firstDay();
-  if (!first) return 0;
-  const thr = S.settings.threshold;
-  const today = todayKey();
-  /* Regel "nie zweimal in Folge": Erst der zweite Fehltag hintereinander beendet die Serie. */
-  let n = 0, missed = false;
-  for (let k = today; k >= first; k = addDays(k, -1)) {
-    if (isPaused(k)) continue;
-    const s = calc(k).score;
-    if (s === null && !plusCounted(k).length) continue;
-    if (s !== null && s >= thr) { n++; missed = false; }
-    else if (k !== today) {
-      if (missed) break;
-      missed = true;
-    }
-  }
-  return n;
-}
-
-function yesterdayMissed() {
-  const k = addDays(todayKey(), -1);
-  const first = firstDay();
-  if (!first || k < first || isPaused(k)) return false;
-  const s = calc(k).score;
-  return s === null ? plusCounted(k).length > 0 : s < S.settings.threshold;
 }
 
 function habitStreak(h) {
@@ -609,338 +533,6 @@ const V = { tab: "heute", day: todayKey(), range: 7, pick: null, month: todayKey
 let sheet = null;
 const app = document.getElementById("app");
 
-function heroMessage(k, c, allDone) {
-  const isToday = k === todayKey();
-  if (allDone) return isToday ? "Alles geschafft." : "Alles geschafft an dem Tag.";
-  if (c.score === null) return isToday ? "Der Tag ist noch offen." : "Noch nichts eingetragen.";
-  if (c.score >= 8) return "Starker Tag.";
-  if (c.score >= 6) return "Läuft gut.";
-  if (c.score >= 4) return "Da geht noch was.";
-  return isToday ? "Noch ist Zeit." : "Morgen neu anfangen.";
-}
-
-/* ---------- Heute ---------- */
-function weekStrip(k) {
-  const mon = mondayOf(k);
-  const today = todayKey();
-  const days = Array.from({ length: 7 }, (_, i) => addDays(mon, i));
-  const canNext = addDays(mon, 7) <= today;
-  return `<nav class="week" aria-label="Woche">
-    <button class="week-nav" data-a="week" data-n="-7" aria-label="Woche davor">${chevron("left")}</button>
-    ${days.map(d => {
-      const c = calc(d);
-      return `<button class="day ${d === k ? "is-sel" : ""}" data-a="goDay" data-k="${d}" ${d > today ? "disabled" : ""} ${d === today ? 'aria-current="date"' : ""}
-        aria-label="${shortDate(d)}${c.score === null ? "" : ", Tageswert " + fmt(c.score)}">
-        ${WD[dow(d)]}<b class="${dayClass(d, c.score)}">${parseKey(d).getDate()}</b></button>`;
-    }).join("")}
-    <button class="week-nav" data-a="week" data-n="7" ${canNext ? "" : "disabled"} aria-label="Woche danach">${chevron("right")}</button>
-  </nav>`;
-}
-
-function plusRow(h, k) {
-  const done = !!(S.days[k] && S.days[k].done && S.days[k].done[h.id]);
-  const skipped = isSkipped(k, h.id);
-  const st = habitStreak(h);
-  const pts = plusPoints(h, k);
-  const week = h.weekly ? `${weekCount(h, k)} von ${weekTarget(h, k)} diese Woche · +${pts}` : h.flex ? `Bonus +${pts}` : "";
-  const flow = h.weekly ? (st >= 2 ? ` · ${st} Wochen` : "") : (st >= 2 ? ` · ${st} in Folge` : "");
-  const peers = groupPeers(h, k);
-  const altDone = !done && peers.find(x => isDone(k, x.id));
-  const orText = peers.length ? ` · oder ${peers.map(x => esc(x.name)).join(", ")}` : "";
-  const sub = skipped ? "Frei, zählt nicht" : altDone ? `Erledigt durch ${esc(altDone.name)}` : `${week || `+${pts} ${pts === 1 ? "Punkt" : "Punkte"}`}${flow}${orText}`;
-  const cls = `row ${done ? "is-done" : ""} ${altDone ? "is-alt" : ""} ${skipped ? "is-skip" : ""} ${V.popId === h.id ? "is-pop" : ""}`;
-  const main = `${ico(h)}<span class="row-main"><span class="row-name">${esc(h.name)}</span><span class="row-sub">${sub}</span></span>`;
-  const mins = (S.days[k] && S.days[k].mins && S.days[k].mins[h.id]) || 0;
-  if (done && h.minutes && !V.skipMode) {
-    return `<div class="${cls}">
-      <button class="row-open" data-a="toggle" data-id="${h.id}" role="checkbox" aria-checked="true">${main}</button>
-      <button class="pill mins" data-a="minsEdit" data-id="${h.id}" aria-label="Minuten für ${esc(h.name)} ändern">${mins} Min</button>
-      <span class="check">${CHECK}</span>
-    </div>`;
-  }
-  return `<button class="${cls}" data-a="${V.skipMode ? "skip" : "toggle"}" data-id="${h.id}" role="checkbox" aria-checked="${done}">
-    ${main}
-    <span class="check">${skipped ? "–" : CHECK}</span>
-  </button>`;
-}
-
-function minusRow(h, k) {
-  const n = (S.days[k] && S.days[k].minus && S.days[k].minus[h.id]) || 0;
-  const free = daysFree(h);
-  const pts = minusPoints(h, k);
-  const total = n * pts;
-  const sub = n ? `−${total} ${total === 1 ? "Punkt" : "Punkte"}` : free >= 2 ? `−${pts} je Mal · ${free} Tage frei` : `−${pts} je Mal`;
-  return `<div class="row ${n ? "is-minus" : ""} ${V.popId === h.id ? "is-pop" : ""}">
-    ${ico(h)}
-    <span class="row-main"><span class="row-name">${esc(h.name)}</span><span class="row-sub">${sub}</span></span>
-    <span class="stepper">
-      ${n ? `<button class="step" data-a="minus" data-id="${h.id}" data-n="-1" aria-label="${esc(h.name)}: eins weniger">−</button><span class="count">${n}</span>` : ""}
-      <button class="step is-add" data-a="minus" data-id="${h.id}" data-n="1" aria-label="${esc(h.name)} eintragen">+</button>
-    </span>
-  </div>`;
-}
-
-function viewToday() {
-  const k = V.day;
-  const today = todayKey();
-  const isToday = k === today;
-  const c = calc(k);
-  const plus = plusShown(k);
-  const minus = minusShown(k);
-  const d = S.days[k] || {};
-  const allDone = isAllDone(k);
-  const pct = c.score === null ? 0 : (c.score - 1) / 9 * 100;
-  const st = streak();
-  const coreList = plus.filter(h => !isBonus(h));
-  const bonusList = plus.filter(isBonus);
-  const slotKey = h => groupOf(h, k) || h.id;
-  const active = coreList.filter(h => !isSkipped(k, h.id));
-  const slotTotal = new Set(active.map(slotKey)).size;
-  const doneShown = new Set(active.filter(h => slotDone(h, k)).map(slotKey)).size;
-  const groups = [["morgens", "Morgens"], ["tags", "Tagsüber"], ["abends", "Abends"], ["", "Jederzeit"]];
-  const grouped = coreList.some(h => h.time);
-  const planHtml = grouped
-    ? groups.map(([id, label]) => {
-        const rows = coreList.filter(h => h.time === id);
-        return rows.length ? `<h3 class="group-label">${label}</h3>${rows.map(h => plusRow(h, k)).join("")}` : "";
-      }).join("")
-    : coreList.map(h => plusRow(h, k)).join("");
-  const bonusHtml = bonusList.length ? `<details class="fold" ${bonusList.some(h => isDone(k, h.id)) ? "open" : ""}>
-      <summary>Bonus, wenn es passt</summary>
-      <div class="list">${bonusList.map(h => plusRow(h, k)).join("")}</div>
-    </details>` : "";
-  const now = new Date();
-  const evening = !isToday || now.getHours() >= 18 || now.getHours() < S.settings.dayStart;
-  const goal = S.settings.weeks[mondayOf(k)];
-  const sundayTip = isToday && dow(k) === 0 ? `<button class="add" data-a="tab" data-tab="verlauf">Zeit für deinen Wochenrückblick</button>` : "";
-  const missedTip = isToday && !isPaused(k) && yesterdayMissed() && (c.score === null || c.score < S.settings.threshold)
-    ? `<p class="section-note" style="margin:0">Gestern ist ausgefallen. Das ist okay. Wichtig ist nur: nicht zweimal in Folge.</p>` : "";
-  const r = d.rating || 0;
-  const paused = isPaused(k);
-
-  const hero = paused ? `<section class="hero is-paused" aria-label="Pause">
-      <div>
-        <div class="eyebrow">Pause</div>
-        <div class="hero-word">${esc(PAUSE_REASONS[d.pause] || "Pause")}</div>
-        <div class="hero-msg">Dieser Tag zählt nicht gegen dich. Deine Serie bleibt.</div>
-      </div>
-      ${mascot(null)}
-      <div class="hero-bar"><button class="btn is-small" data-a="endPause">Pause beenden</button></div>
-    </section>` : `<section class="hero ${allDone ? "is-done" : ""} ${V.popHero ? "is-pop" : ""}" id="hero" aria-label="Tageswert">
-      <div>
-        <div class="eyebrow">${c.aiScore !== null ? "KI-Wert" : "Tageswert"}</div>
-        ${c.score === null ? `<div class="hero-word">Offen</div>` : `<div class="hero-score">${fmt(c.score)}<small>/10</small></div>`}
-        <div class="hero-msg">${heroMessage(k, c, allDone)}</div>
-      </div>
-      ${mascot(c.score)}
-      <div class="hero-bar">
-        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="Fortschritt"><i style="width:${pct}%"></i></div>
-        <div class="hero-points"><span>+${c.core} von ${c.possible}</span>${c.aiScore !== null && c.habitScore !== null ? `<span>Habits ${fmt(c.habitScore)}</span>` : ""}${c.bonus ? `<span>+${c.bonus} Bonus</span>` : ""}${c.minus ? `<span>−${c.minus} Minus</span>` : ""}</div>
-      </div>
-    </section>`;
-
-  const lists = paused ? "" : `<section class="section">
-      <div class="section-head"><h2>${isToday ? "Das steht an" : "Das stand an"}</h2>
-        <div class="section-tools"><span>${doneShown} von ${slotTotal}</span><button class="link" data-a="skipMode">${V.skipMode ? "Fertig" : "Frei nehmen"}</button></div></div>
-      ${V.skipMode ? `<p class="section-note">Tippe auf alles, was an diesem Tag nicht zählen soll.</p>` : ""}
-      <div class="list">
-        ${planHtml || `<p class="hint">Für diesen Tag ist nichts geplant.</p>`}
-        <button class="add" data-a="newHabit" data-type="plus">+ Habit hinzufügen</button>
-      </div>
-    </section>
-
-    ${bonusHtml}
-
-    <section class="section">
-      <div class="section-head"><h2>Minuspunkte</h2><span>${c.minus ? "−" + c.minus : "0"}</span></div>
-      <div class="list">
-        ${minus.map(h => minusRow(h, k)).join("")}
-        <button class="add" data-a="newHabit" data-type="minus">+ Minuspunkt hinzufügen</button>
-      </div>
-    </section>`;
-
-  const reflect = reflectCard(k, isToday, d, r);
-
-  return `<div class="page">
-    <header class="top">
-      <div class="brand">${LOGO}Stetig</div>
-      <div class="top-actions">
-        ${isToday ? "" : `<button class="chip is-today" data-a="goDay" data-k="${today}">Heute</button>`}
-        ${paused ? "" : `<button class="chip" data-a="askPause">Pause</button>`}
-        <span class="chip" title="Tage in Folge mit Tageswert ab ${S.settings.threshold}" aria-label="${st} Tage in Folge"><span style="color:var(--orange)">${iconSvg("flame")}</span>${st}</span>
-      </div>
-    </header>
-
-    <div class="headline">
-      <h1>${isToday ? "Heute" : WD_LONG[dow(k)]}</h1>
-      <p>${isToday ? WD_LONG[dow(k)] + ", " : ""}${longDate(k)}</p>
-    </div>
-
-    ${weekStrip(k)}
-
-    ${hero}
-    ${missedTip}
-    ${goal ? `<div class="goal"><span class="eyebrow">Vorsatz dieser Woche</span><p>${esc(goal)}</p></div>` : ""}
-    ${sundayTip}
-
-    ${evening ? reflect + lists : lists + reflect}
-  </div>`;
-}
-
-function reflectCard(k, isToday, d, r) {
-  return `<section class="reflect" aria-label="Tagesfazit">
-      <div class="reflect-head">
-        <div><h2>Dein Fazit</h2><p>Wie war ${isToday ? "dein Tag" : "der Tag"} von 1 bis 10?</p></div>
-        <svg class="reflect-moon" viewBox="0 0 54 54" aria-hidden="true"><path d="M42 34A19 19 0 1 1 22 8a15 15 0 0 0 20 26z" fill="#ffce00"/><circle cx="42" cy="13" r="2.500" fill="#d9cdf7"/><circle cx="33" cy="22" r="1.600" fill="#d9cdf7"/><circle cx="49" cy="24" r="1.600" fill="#d9cdf7"/></svg>
-      </div>
-      <div class="scale" role="group" aria-label="Fazit von 1 bis 10">
-        ${Array.from({ length: 10 }, (_, i) => `<button data-a="rate" data-n="${i + 1}" aria-pressed="${r === i + 1}">${i + 1}</button>`).join("")}
-      </div>
-      <div>
-        <label for="note">Notiz zum Tag</label>
-        <textarea class="note" id="note" maxlength="500" placeholder="Was lief gut? Was machst du morgen anders?">${esc(d.note || "")}</textarea>
-      </div>
-      ${aiDayCard(k, d)}
-    </section>`;
-}
-
-/* ---------- Verlauf ---------- */
-function chart(keys) {
-  const thr = S.settings.threshold;
-  const bar = k => {
-    const c = calc(k);
-    const rating = S.days[k] && S.days[k].rating;
-    const label = `${shortDate(k)}: ${isPaused(k) ? "Pause" : c.score === null ? "kein Eintrag" : "Tageswert " + fmt(c.score)}${rating ? ", Fazit " + rating : ""}`;
-    return `<button data-a="pick" data-k="${k}" class="${V.pick === k ? "is-sel" : ""}" aria-label="${label}" title="${label}">
-      <i class="${c.score === null ? "is-empty" : ""} ${isPaused(k) ? "is-pause-bar" : ""}" style="height:${c.score === null ? 4 : c.score * 10}%"></i>
-      ${rating ? `<u style="bottom:${rating * 10}%"></u>` : ""}
-    </button>`;
-  };
-  const pick = V.pick && keys.includes(V.pick) ? V.pick : null;
-  const pc = pick ? calc(pick) : null;
-  const pr = pick && S.days[pick] && S.days[pick].rating;
-  return `<div class="chart" role="group" aria-label="Tageswert je Tag">
-      <div class="chart-line" style="top:0"><em>10</em></div>
-      <div class="chart-line is-thr" style="top:${100 - thr * 10}%"><em>${thr}</em></div>
-      <div class="chart-line" style="top:100%"><em>0</em></div>
-      <div class="bars ${keys.length > 14 ? "is-dense" : ""}">${keys.map(bar).join("")}</div>
-    </div>
-    <div class="chart-x"><span>${shortDate(keys[0])}</span><span>Heute</span></div>
-    <div class="legend"><span><i></i>Tageswert</span><span><i class="is-dot"></i>Dein Fazit</span><span>Gestrichelt: Serie ab ${thr}</span></div>
-    ${pick ? `<div class="pick"><span><b>${shortDate(pick)}</b> · ${isPaused(pick) ? "Pause" : pc.score === null ? "kein Eintrag" : "Wert " + fmt(pc.score)}${pr ? " · Fazit " + pr : ""}</span><button class="link" data-a="openDay" data-k="${pick}">Tag öffnen</button></div>` : ""}`;
-}
-
-function calendar() {
-  const [y, m] = V.month.split("-").map(Number);
-  const count = new Date(y, m, 0).getDate();
-  const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
-  const today = todayKey();
-  const cells = [];
-  for (let i = 0; i < lead; i++) cells.push("<div></div>");
-  for (let d = 1; d <= count; d++) {
-    const k = `${y}-${pad(m)}-${pad(d)}`;
-    const c = calc(k);
-    cells.push(`<button class="${dayClass(k, c.score)} ${k === today ? "is-today" : ""}" data-a="openDay" data-k="${k}" ${k > today ? "disabled" : ""} aria-label="${shortDate(k)}${isPaused(k) ? ", Pause" : c.score === null ? ", kein Eintrag" : ", Tageswert " + fmt(c.score)}">${d}</button>`);
-  }
-  const canNext = V.month < today.slice(0, 7);
-  return `<section class="panel">
-    <div class="panel-head"><h3>${MONTHS[m - 1]} ${y}</h3>
-      <div class="month-nav"><button data-a="month" data-n="-1" aria-label="Monat davor">${chevron("left")}</button><button data-a="month" data-n="1" ${canNext ? "" : "disabled"} aria-label="Monat danach">${chevron("right")}</button></div>
-    </div>
-    <div class="cal">${MON_FIRST.map(i => `<small>${WD[i]}</small>`).join("")}${cells.join("")}</div>
-    <div class="ramp"><span>Tageswert 1</span><i class="t1"></i><i class="t2"></i><i class="t3"></i><i class="t4"></i><span>10</span><i class="is-pause" style="margin-left:10px"></i><span>Pause</span></div>
-  </section>`;
-}
-
-function viewHistory() {
-  const keys = rangeDays(V.range);
-  const prev = rangeDays(V.range * 2).slice(0, V.range);
-  const first = firstDay();
-  const scores = [];
-  let missed = 0, pausedDays = 0;
-  keys.forEach(k => {
-    const s = calc(k).score;
-    if (isPaused(k)) { if (first && k >= first && k <= todayKey()) pausedDays++; }
-    else if (s !== null) scores.push(s);
-    else if (missedDay(k, first)) { scores.push(1); missed++; }
-  });
-  const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
-  const avgNote = [
-    missed ? `${missed} ${missed === 1 ? "Tag" : "Tage"} ohne Eintrag ${missed === 1 ? "zählt" : "zählen"} als 1,0.` : "",
-    pausedDays ? `${pausedDays} ${pausedDays === 1 ? "Pausentag zählt" : "Pausentage zählen"} nicht.` : ""
-  ].filter(Boolean).join(" ");
-  const stats = S.habits.filter(h => h.type === "plus" && !h.archived).map(h => ({ h, c: constancy(h, keys) }));
-  const totals = stats.reduce((a, s) => [a[0] + s.c.done, a[1] + s.c.planned], [0, 0]);
-  const totalPct = totals[1] ? Math.round(totals[0] / totals[1] * 100) : null;
-  const minusList = S.habits.filter(h => h.type === "minus" && !h.archived).map(h => {
-    const sum = list => list.reduce((a, k) => a + ((S.days[k] && S.days[k].minus && S.days[k].minus[h.id]) || 0), 0);
-    return { h, now: sum(keys), before: sum(prev) };
-  });
-
-  const seg = `<div class="seg" role="group" aria-label="Zeitraum">
-    <button data-a="range" data-n="7" aria-pressed="${V.range === 7}">7 Tage</button>
-    <button data-a="range" data-n="30" aria-pressed="${V.range === 30}">30 Tage</button></div>`;
-
-  const body = !first ? `<section class="panel"><div class="empty">${mascot(null)}<b>Noch kein Verlauf</b><span>Hake unter „Heute“ dein erstes Habit ab. Danach siehst du hier deine Kurve.</span></div></section>` : `
-    <div class="tiles">
-      <div class="tile"><b>${streak()}</b><span>Tage Serie</span></div>
-      <div class="tile"><b>${avg === null ? "–" : fmt(avg)}</b><span>Ø Tageswert</span></div>
-      <div class="tile"><b>${totalPct === null ? "–" : totalPct + " %"}</b><span>Konstanz</span></div>
-    </div>
-    ${avgNote ? `<p class="section-note">${avgNote}</p>` : ""}
-    ${weekPanel()}
-    <section class="panel"><h3>Tageswert</h3>${chart(keys)}</section>
-    ${calendar()}
-    ${skillsPanel()}
-    ${insightsPanel()}
-    <section class="panel"><h3>Konstanz je Habit</h3>
-      ${stats.filter(s => s.c.planned).sort((a, b) => (b.c.done / (b.c.planned || 1)) - (a.c.done / (a.c.planned || 1))).map(({ h, c }) => {
-        const p = c.planned ? Math.round(c.done / c.planned * 100) : 0;
-        return `<div class="stat-row">${ico(h, true)}<span class="stat-name">${esc(h.name)}</span><span class="stat-val">${c.done} von ${c.planned}</span>
-          <div class="bar on-card" role="progressbar" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(h.name)}: ${p} Prozent"><i style="width:${p}%"></i></div></div>`;
-      }).join("") || `<p class="panel-note">Noch keine Habits angelegt.</p>`}
-    </section>
-    <section class="panel"><h3>Minuspunkte</h3>
-      ${minusList.map(({ h, now, before }) => `<div class="stat-row">${ico(h, true)}<span class="stat-name">${esc(h.name)}</span><span class="stat-val">${now}×</span><span class="stat-sub" style="grid-column:2/-1">Davor ${before}×${now < before ? " · weniger geworden" : now > before ? " · mehr geworden" : ""}</span></div>`).join("") || `<p class="panel-note">Noch keine Minuspunkte angelegt.</p>`}
-    </section>
-    ${notesPanel()}`;
-
-  return `<div class="page">
-    <header class="top"><div class="brand">${LOGO}Stetig</div></header>
-    <div class="headline"><h1>Verlauf</h1><p>So konstant bist du.</p></div>
-    ${first ? seg : ""}
-    ${body}
-  </div>`;
-}
-
-/* ---------- Habits verwalten ---------- */
-function dayLabel(h) {
-  if (h.weekly) return `${h.weekly}× pro Woche`;
-  if (h.flex) return "Bonus, ohne Ziel";
-  if (h.days.length === 7) return "Jeden Tag";
-  const s = [...h.days].sort((a, b) => MON_FIRST.indexOf(a) - MON_FIRST.indexOf(b));
-  if (s.join() === "1,2,3,4,5") return "Mo bis Fr";
-  if (s.join() === "6,0") return "Sa und So";
-  return s.map(d => WD[d]).join(", ");
-}
-
-function manageRow(h, list, i) {
-  const peers = S.habits.filter(x => h.group && x.group === h.group && x.id !== h.id && !x.archived);
-  const pts = h.type === "plus" ? `+${h.points} · ${dayLabel(h)}${peers.length ? ` · oder ${peers.map(x => esc(x.name)).join(", ")}` : ""}` : `−${h.points} je Mal`;
-  const flip = h.type === "plus" ? `<button class="pill kind" data-a="flipKind" data-id="${h.id}" aria-label="${esc(h.name)} zu ${isBonus(h) ? "Pflicht" : "Bonus"} machen">${isBonus(h) ? "Zu Pflicht" : "Zu Bonus"}</button>` : "";
-  return `<div class="row is-plain">
-    <button class="row-open" data-a="edit" data-id="${h.id}" aria-label="${esc(h.name)} bearbeiten">
-      ${ico(h)}
-      <span class="row-main"><span class="row-name">${esc(h.name)}</span><span class="row-sub">${pts}</span></span>
-    </button>
-    ${flip}
-    <span class="row-tools">
-      <button data-a="move" data-id="${h.id}" data-n="-1" ${i === 0 ? "disabled" : ""} aria-label="${esc(h.name)} nach oben">${chevron("up")}</button>
-      <button data-a="move" data-id="${h.id}" data-n="1" ${i === list.length - 1 ? "disabled" : ""} aria-label="${esc(h.name)} nach unten">${chevron("down")}</button>
-    </span>
-  </div>`;
-}
-
 function installPanel() {
   const installed = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
   if (window.claude || installed) return "";
@@ -953,146 +545,7 @@ function installPanel() {
 
 function markBackup() { S.settings.lastBackup = todayKey(); touchHabits(); }
 
-function viewManage() {
-  const plus = S.habits.filter(h => h.type === "plus" && !h.archived && !isBonus(h));
-  const bonus = S.habits.filter(h => h.type === "plus" && !h.archived && isBonus(h));
-  const minus = S.habits.filter(h => h.type === "minus" && !h.archived);
-  const today = todayKey();
-  const dailyPoints = calc(today).possible;
-  const where = cloud.on ? (window.claude ? "Gespeichert in deinem Claude-Konto. Handy und PC zeigen denselben Stand." : "Gespeichert auf diesem Gerät und in deinem Konto. Alle Geräte zeigen denselben Stand.") : hasDisk ? "Gespeichert auf diesem Gerät. Mach ab und zu eine Sicherung." : "Dieser Browser erlaubt kein Speichern. Einträge gehen beim Schließen verloren.";
-  return `<div class="page">
-    <header class="top"><div class="brand">${LOGO}Stetig</div></header>
-    <div class="headline"><h1>Habits</h1><p>Was zählt, entscheidest du.</p></div>
-
-    <section class="section">
-      <div class="section-head"><h2>Pflicht</h2><span>${dailyPoints} Punkte heute</span></div>
-      <p class="section-note">Das zählt jeden Tag fest. ${plus.length > 5 ? "Mehr als 5 macht eine gute Note schwer. Stell den Rest auf Bonus." : "3 bis 5 Habits sind ideal."}</p>
-      <div class="list">${plus.map((h, i) => manageRow(h, plus, i)).join("")}
-      <button class="add" data-a="newHabit" data-type="plus">+ Habit hinzufügen</button></div>
-    </section>
-
-    <section class="section">
-      <div class="section-head"><h2>Bonus</h2><span>${bonus.length}</span></div>
-      <p class="section-note">Bringt Extrapunkte und kostet nie etwas.</p>
-      <div class="list">${bonus.map((h, i) => manageRow(h, bonus, i)).join("") || `<p class="hint">Noch keine Bonus-Habits. In der Bibliothek findest du über 200 Ideen.</p>`}</div>
-    </section>
-
-    <section class="section">
-      <div class="section-head"><h2>Minuspunkte</h2><span>${minus.length}</span></div>
-      <div class="list">${minus.map((h, i) => manageRow(h, minus, i)).join("")}
-      <button class="add" data-a="newHabit" data-type="minus">+ Minuspunkt hinzufügen</button></div>
-    </section>
-
-    ${aiPanel()}
-
-    <h2 class="group-title">Einstellungen</h2>
-    <details class="fold">
-      <summary>Tageswert und Serie</summary>
-      <section class="panel">
-      <h3>So zählt der Tageswert</h3>
-      <p class="panel-note">Lässt du den Tag von der KI bewerten, zählt ihre Note als Tageswert. Sie berücksichtigt, was los war, und vergleicht mit deinen letzten Tagen. Ohne KI-Bewertung gilt der Wert aus den Habits:</p>
-      <p class="panel-note">Alle Pflicht-Habits des Tages ergeben 10, keine ergeben 1. Bei Entweder-oder reicht eines. Bonus-Habits wie Sport geben Extrapunkte und kosten nichts, wenn du sie auslässt. So kannst du Lücken ausgleichen, mehr als 10 geht nicht. Jeder Minuspunkt zieht 0,9 ab, an jedem Tag gleich viel. Dein Fazit von 1 bis 10 steht getrennt daneben. Vergangene Tage behalten ihren Wert, auch wenn du später Punkte änderst.</p>
-      <div class="setting"><span class="stat-name">Serie zählt ab Tageswert</span>
-        <span class="stepper"><button class="step" data-a="thr" data-n="-1" ${S.settings.threshold <= 2 ? "disabled" : ""} aria-label="Grenze senken">−</button><span class="count">${S.settings.threshold}</span><button class="step" data-a="thr" data-n="1" ${S.settings.threshold >= 9 ? "disabled" : ""} aria-label="Grenze erhöhen">+</button></span>
-      </div>
-      <div class="setting"><span class="stat-name">Neuer Tag beginnt um ${S.settings.dayStart} Uhr</span>
-        <span class="stepper"><button class="step" data-a="dayStart" data-n="-1" ${S.settings.dayStart <= 0 ? "disabled" : ""} aria-label="Früher">−</button><span class="count">${S.settings.dayStart}</span><button class="step" data-a="dayStart" data-n="1" ${S.settings.dayStart >= 6 ? "disabled" : ""} aria-label="Später">+</button></span>
-      </div>
-      </section>
-    </details>
-
-    <details class="fold">
-      <summary>Daten und Sicherung</summary>
-      <section class="panel">
-      <h3>Deine Daten</h3>
-      <p class="panel-note">${where}</p>
-      <p class="panel-note">Letzte Sicherung: ${S.settings.lastBackup ? shortDate(S.settings.lastBackup) : "noch keine"}</p>
-      <button class="btn is-ghost is-small" data-a="backup">Sicherung</button>
-      </section>
-    </details>
-
-    ${accountPanel()}
-
-    <details class="fold">
-      <summary>App-Sperre</summary>
-      ${pinPanel()}
-    </details>
-
-    <details class="fold">
-      <summary>Erinnerung und Installation</summary>
-      ${installPanel()}
-      ${reminderPanel()}
-    </details>
-    <p class="hint" id="appVersion">Stetig Version ${APP_VERSION}</p>
-  </div>`;
-}
-
 /* ---------- Bottom Sheets ---------- */
-function altField() {
-  const others = S.habits.filter(h => h.type === "plus" && !h.archived && h.id !== sheet.editId);
-  if (!others.length) return "";
-  const alts = sheet.draft.alts;
-  return `<div class="field"><span class="label">Entweder-oder mit</span>
-    <div class="chips" role="group">${others.map(h => `<button class="pill" data-a="draftAlt" data-n="${h.id}" aria-pressed="${alts.includes(h.id)}">${esc(h.name)}</button>`).join("")}</div>
-    <p class="hint">Du machst eines davon, und der Platz im Tag ist voll. Beides zählt nicht doppelt.</p></div>`;
-}
-
-/* Macht ein Habit zum Teil einer Entweder-oder-Gruppe. Alle Mitglieder bekommen dieselbe Art. */
-function applyGroup(h, alts) {
-  const old = h.group;
-  S.habits.forEach(x => { if (old && x.group === old && x.id !== h.id && !alts.includes(x.id)) x.group = ""; });
-  if (!alts.length) h.group = "";
-  else {
-    const members = alts.map(id => S.habits.find(x => x.id === id)).filter(Boolean);
-    const gid = old || members.map(x => x.group).find(Boolean) || "g" + uid();
-    h.group = gid;
-    members.forEach(x => {
-      const prior = x.group;
-      S.habits.forEach(y => { if (prior && y.group === prior) y.group = gid; });
-      x.group = gid;
-      x.weekly = h.weekly;
-      x.flex = h.flex;
-      x.days = h.days.slice();
-    });
-  }
-  const counts = {};
-  S.habits.filter(x => x.group && !x.archived).forEach(x => { counts[x.group] = (counts[x.group] || 0) + 1; });
-  S.habits.forEach(x => { if (x.group && (counts[x.group] || 0) < 2) x.group = ""; });
-}
-
-function habitSheet() {
-  const d = sheet.draft;
-  const isPlus = d.type === "plus";
-  const title = sheet.editId ? "Bearbeiten" : isPlus ? "Neues Habit" : "Neuer Minuspunkt";
-  return `<div class="sheet-head"><h2 id="sheetTitle">${title}</h2><button class="close" data-a="close" aria-label="Schließen">×</button></div>
-    ${sheet.editId ? "" : `<button class="btn is-ghost is-small" data-a="library" data-type="${d.type}">Aus der Bibliothek wählen</button>`}    <div class="field"><label for="hName">Name</label>
-      <input class="input" id="hName" maxlength="40" autocomplete="off" value="${esc(d.name)}" placeholder="${isPlus ? "Zum Beispiel: Gitarre üben" : "Zum Beispiel: Handy im Bett"}"></div>
-    ${sheet.editId ? "" : `<div class="chips" aria-label="Vorschläge">${SUGGEST[d.type].map(s => `<button class="pill" data-a="suggest" data-s="${esc(s)}">${esc(s)}</button>`).join("")}</div>`}
-    <div class="field"><span class="label">${isPlus ? "Pluspunkte" : "Minuspunkte je Mal"}</span>
-      <div class="points ${isPlus ? "" : "is-minus"}" role="group">${[1, 2, 3, 4, 5].map(n => `<button data-a="draftPts" data-n="${n}" aria-pressed="${d.points === n}">${isPlus ? "+" : "−"}${n}</button>`).join("")}</div></div>
-    ${isPlus ? `<div class="field"><span class="label">Rhythmus</span>
-      <div class="seg" role="group"><button data-a="draftWeekly" data-n="0" aria-pressed="${!d.weekly && !d.flex}">Pflicht</button><button data-a="draftWeekly" data-n="${d.weekly || 3}" aria-pressed="${!!d.weekly}">Pro Woche</button><button data-a="draftFlex" aria-pressed="${!!d.flex}">Bonus</button></div>
-      <p class="hint">${d.flex ? "Ohne Ziel. Bringt Punkte, wenn du es machst, und kostet nie etwas." : d.weekly ? "Für Sport und Ähnliches. Bringt Punkte, wenn du es machst. Tage ohne kosten nichts." : "Zählt an den gewählten Tagen fest zum Tagesplan."}</p></div>
-    ${altField()}
-    ${d.flex ? "" : d.weekly ? `<div class="field"><span class="label">Wie oft pro Woche</span>
-      <div class="days weekly" role="group">${[1, 2, 3, 4, 5, 6].map(n => `<button data-a="draftWeekly" data-n="${n}" aria-pressed="${d.weekly === n}">${n}×</button>`).join("")}</div></div>`
-    : `<div class="field"><span class="label">An diesen Tagen</span>
-      <div class="days" role="group">${MON_FIRST.map(n => `<button data-a="draftDay" data-n="${n}" aria-pressed="${d.days.includes(n)}">${WD[n]}</button>`).join("")}</div></div>`}
-    <div class="field"><span class="label">Tageszeit</span>
-      <div class="chips" role="group">${[["morgens", "Morgens"], ["tags", "Tagsüber"], ["abends", "Abends"], ["", "Jederzeit"]].map(([v, l]) => `<button class="pill" data-a="draftTime" data-n="${v}" aria-pressed="${d.time === v}">${l}</button>`).join("")}</div></div>
-    <div class="field"><span class="label">Zeit als Skill zählen</span>
-      <div class="chips" role="group">${[0, 5, 10, 15, 20, 30, 60].map(n => `<button class="pill" data-a="draftMinutes" data-n="${n}" aria-pressed="${d.minutes === n}">${n ? n + " Min" : "Aus"}</button>`).join("")}</div></div>` : ""}
-    <div class="field"><span class="label">Symbol</span>
-      <div class="icons" role="group">${ICON_ORDER.map(n => `<button data-a="draftIcon" data-n="${n}" aria-pressed="${d.icon === n}" aria-label="Symbol ${n}">${iconSvg(n)}</button>`).join("")}</div></div>
-    <div class="field"><span class="label">Farbe</span>
-      <div class="swatches" role="group">${COLORS.map(c => `<button class="c-${c}" data-a="draftColor" data-n="${c}" aria-pressed="${d.color === c}" aria-label="Farbe ${c}"></button>`).join("")}</div></div>
-    <p class="hint is-error" ${sheet.err ? "" : "hidden"}>${esc(sheet.err || "")}</p>
-    <button class="btn is-go" data-a="saveHabit">${sheet.editId ? "Speichern" : "Hinzufügen"}</button>
-    ${sheet.editId ? (sheet.confirmDel
-      ? `<p class="hint">Das Habit verschwindet aus deinen Listen. Dein Verlauf bleibt erhalten.</p><div class="btn-row"><button class="btn is-ghost is-small" data-a="cancelDel">Behalten</button><button class="btn is-danger is-small" data-a="doDel">Ja, entfernen</button></div>`
-      : `<button class="btn is-danger is-small" data-a="askDel">Entfernen</button>`) : ""}`;
-}
-
 function backupSheet() {
   return `<div class="sheet-head"><h2 id="sheetTitle">Sicherung</h2><button class="close" data-a="close" aria-label="Schließen">×</button></div>
     <p class="hint">Mit einer Sicherung nimmst du alle Habits und Tage auf ein anderes Gerät mit.</p>
@@ -1111,17 +564,6 @@ function backupSheet() {
     <p class="hint ${sheet.err ? "is-error" : ""}" ${sheet.msg || sheet.err ? "" : "hidden"}>${esc(sheet.err || sheet.msg || "")}</p>`;
 }
 
-function pauseSheet() {
-  return `<div class="sheet-head"><h2 id="sheetTitle">Pause</h2><button class="close" data-a="close" aria-label="Schließen">×</button></div>
-    <p class="hint">Pausentage zählen nicht. Deine Serie bleibt stehen und läuft danach weiter.</p>
-    <div class="field"><span class="label">Grund</span>
-      <div class="chips" role="group">${Object.keys(PAUSE_REASONS).map(r => `<button class="pill" data-a="pauseReason" data-n="${r}" aria-pressed="${sheet.reason === r}">${PAUSE_REASONS[r]}</button>`).join("")}</div></div>
-    <div class="field"><label for="pauseUntil">Von ${shortDate(V.day)} bis</label>
-      <input class="input" id="pauseUntil" type="date" min="${V.day}" max="${addDays(V.day, 60)}" value="${sheet.until}"></div>
-    <p class="hint is-error" ${sheet.err ? "" : "hidden"}>${esc(sheet.err || "")}</p>
-    <button class="btn is-go" data-a="savePause">Pause eintragen</button>`;
-}
-
 function renderSheet() {
   let host = document.getElementById("sheetHost");
   if (!sheet) { if (host) host.remove(); return; }
@@ -1133,7 +575,7 @@ function renderSheet() {
   }
   const box = host.querySelector(".sheet");
   const top = box.scrollTop;
-  host.querySelector(".sheet-in").innerHTML = `<div class="grabber" aria-hidden="true"></div>` + (sheet.mode === "habit" ? habitSheet() : sheet.mode === "pause" ? pauseSheet() : sheet.mode === "backup" ? backupSheet() : window.EXTRA_SHEETS[sheet.mode]());
+  host.querySelector(".sheet-in").innerHTML = `<div class="grabber" aria-hidden="true"></div>` + (sheet.mode === "habit" ? habitSheet() : sheet.mode === "backup" ? backupSheet() : window.EXTRA_SHEETS[sheet.mode]());
   box.scrollTop = top;
 }
 
@@ -1186,44 +628,17 @@ function confetti() {
 
 /* ---------- Aktionen ---------- */
 function isAllDone(k) {
-  const c = calc(k);
-  return !isPaused(k) && c.possible > 0 && c.core >= c.possible && c.minus === 0;
+  const p = dayProgress(k);
+  return p.total > 0 && p.done >= p.total;
 }
 
 function emptyDraft(type) {
   const used = S.habits.filter(h => !h.archived).length;
-  return { type, name: "", points: type === "plus" ? 2 : 1, days: ALL_DAYS.slice(), icon: type === "plus" ? "star" : "stop", color: type === "plus" ? COLORS[used % 6] : "pink", weekly: 0, flex: false, time: "", minutes: 0, alts: [] };
+  return { type, name: "", days: ALL_DAYS.slice(), icon: type === "plus" ? "star" : "stop", color: type === "plus" ? COLORS[used % 6] : "pink", weekly: 0, flex: false, time: "", minutes: 0, alts: [] };
 }
 
 const actions = {
   tab(d) { V.tab = d.tab; V.pick = null; V.skipMode = false; render(); scrollTo(0, 0); },
-  skipMode() { V.skipMode = !V.skipMode; render(); },
-  skip(d) {
-    const k = V.day, day = dayOf(k);
-    if (day.skip && day.skip[d.id]) delete day.skip[d.id];
-    else { day.skip = day.skip || {}; day.skip[d.id] = 1; delete day.done[d.id]; }
-    touchDay(k);
-    V.popHero = true;
-    render();
-  },
-  askPause() { sheet = { mode: "pause", reason: "krank", until: V.day }; renderSheet(); },
-  pauseReason(d) { syncPause(); sheet.reason = d.n; renderSheet(); },
-  savePause() {
-    syncPause();
-    if (!sheet.until || sheet.until < V.day) { sheet.err = "Das Enddatum darf nicht vor dem Starttag liegen."; renderSheet(); return; }
-    if (sheet.until > addDays(V.day, 60)) { sheet.err = "Eine Pause geht höchstens 60 Tage."; renderSheet(); return; }
-    const now = Date.now();
-    for (let k = V.day; k <= sheet.until; k = addDays(k, 1)) { const day = dayOf(k); day.pause = sheet.reason; day.t = now; }
-    persist();
-    V.skipMode = false;
-    closeSheet();
-  },
-  endPause() {
-    const now = Date.now();
-    for (let k = V.day; isPaused(k); k = addDays(k, 1)) { delete S.days[k].pause; S.days[k].t = now; }
-    persist();
-    render();
-  },
   dayStart(d) {
     const wasToday = V.day === todayKey();
     S.settings.dayStart = clamp(S.settings.dayStart + Number(d.n), 0, 6);
@@ -1273,54 +688,18 @@ const actions = {
     V.popId = d.id; V.popHero = true;
     render();
   },
-  rate(d) {
-    const day = dayOf(V.day), n = Number(d.n);
-    if (day.rating === n) delete day.rating; else day.rating = n;
-    touchDay(V.day);
-    render();
-  },
-  range(d) { V.range = Number(d.n); V.pick = null; render(); },
-  pick(d) { V.pick = V.pick === d.k ? null : d.k; render(); },
-  month(d) {
-    const [y, m] = V.month.split("-").map(Number);
-    const x = new Date(y, m - 1 + Number(d.n), 1);
-    V.month = `${x.getFullYear()}-${pad(x.getMonth() + 1)}`;
-    render();
-  },
   newHabit(d) { sheet = { mode: "habit", draft: emptyDraft(d.type) }; renderSheet(); },
   edit(d) {
     const h = S.habits.find(x => x.id === d.id);
     if (!h) return;
-    sheet = { mode: "habit", editId: h.id, draft: { type: h.type, name: h.name, points: h.points, days: h.days.slice(), icon: h.icon, color: h.color, weekly: h.weekly, flex: h.flex, time: h.time, minutes: h.minutes, alts: S.habits.filter(x => h.group && x.group === h.group && x.id !== h.id && !x.archived).map(x => x.id) } };
+    sheet = { mode: "habit", editId: h.id, draft: { type: h.type, name: h.name, days: h.days.slice(), icon: h.icon, color: h.color, weekly: h.weekly, flex: h.flex, time: h.time, minutes: h.minutes, alts: S.habits.filter(x => h.group && x.group === h.group && x.id !== h.id && !x.archived).map(x => x.id) } };
     renderSheet();
   },
   close() { closeSheet(); },
-  suggest(d) { syncDraft(); sheet.draft.name = d.s; sheet.err = ""; renderSheet(); },
-  draftPts(d) { syncDraft(); sheet.draft.points = Number(d.n); renderSheet(); },
   draftIcon(d) { syncDraft(); sheet.draft.icon = d.n; renderSheet(); },
   draftColor(d) { syncDraft(); sheet.draft.color = d.n; renderSheet(); },
   draftWeekly(d) { syncDraft(); sheet.draft.weekly = Number(d.n); sheet.draft.flex = false; renderSheet(); },
   draftFlex() { syncDraft(); sheet.draft.weekly = 0; sheet.draft.flex = true; renderSheet(); },
-  draftAlt(d) {
-    syncDraft();
-    const alts = sheet.draft.alts;
-    sheet.draft.alts = alts.includes(d.n) ? alts.filter(x => x !== d.n) : alts.concat(d.n);
-    renderSheet();
-  },
-  flipKind(d) {
-    const h = S.habits.find(x => x.id === d.id);
-    if (!h) return;
-    const toPflicht = isBonus(h);
-    const peers = S.habits.filter(x => h.group && x.group === h.group);
-    (peers.length ? peers : [h]).forEach(x => {
-      x.flex = !toPflicht;
-      x.weekly = 0;
-    });
-    touchHabits();
-    render();
-  },
-  draftTime(d) { syncDraft(); sheet.draft.time = d.n; renderSheet(); },
-  draftMinutes(d) { syncDraft(); sheet.draft.minutes = Number(d.n); renderSheet(); },
   draftDay(d) {
     syncDraft();
     const n = Number(d.n), list = sheet.draft.days;
@@ -1338,13 +717,12 @@ const actions = {
     let saved;
     if (sheet.editId) {
       saved = S.habits.find(x => x.id === sheet.editId);
-      Object.assign(saved, { name: dr.name, points: dr.points, days: dr.days, icon: dr.icon, color: dr.color, weekly: dr.weekly, flex: dr.flex, time: dr.time, minutes: dr.minutes });
+      Object.assign(saved, { name: dr.name, days: dr.days, icon: dr.icon, color: dr.color, weekly: dr.weekly, flex: dr.flex, time: dr.time, minutes: dr.minutes });
     } else {
       const { alts: _unused, ...fields } = dr;
       saved = Object.assign({ id: uid(), from: todayKey(), archived: null, group: "" }, fields);
       S.habits.push(saved);
     }
-    if (saved.type === "plus") applyGroup(saved, alts);
     touchHabits();
     closeSheet();
   },
@@ -1357,7 +735,6 @@ const actions = {
       const today = todayKey();
       const doneToday = S.days[today] && S.days[today].done && S.days[today].done[h.id];
       h.archived = doneToday ? addDays(today, 1) : today;
-      applyGroup(h, []);
       touchHabits();
     }
     closeSheet();
@@ -1372,7 +749,6 @@ const actions = {
     touchHabits();
     render();
   },
-  thr(d) { S.settings.threshold = clamp(S.settings.threshold + Number(d.n), 2, 9); touchHabits(); render(); },
   backup() { sheet = { mode: "backup" }; renderSheet(); },
   async saveFile() {
     const name = `stetig-sicherung-${todayKey()}.json`;
@@ -1446,13 +822,7 @@ function syncDraft() {
   if (input && sheet && sheet.draft) sheet.draft.name = input.value;
 }
 
-function syncPause() {
-  const input = document.getElementById("pauseUntil");
-  if (input && sheet) { sheet.until = input.value; sheet.err = ""; }
-}
-
 function closeSheet() {
-  if (aiCtl) aiCtl.abort();
   sheet = null;
   renderSheet();
   render();
@@ -1490,8 +860,6 @@ document.addEventListener("click", e => {
 });
 
 document.addEventListener("input", e => {
-  if (e.target.id === "weekGoal") { setWeekGoal(e.target.value); return; }
-  if (e.target.id === "dayCtx") { dayOf(V.day).ctx = e.target.value.slice(0, 200); touchDay(V.day); return; }
   if (e.target.id === "libSearch" && sheet) { sheet.q = e.target.value; renderLibraryList(); return; }
   if (e.target.id !== "note") return;
   dayOf(V.day).note = e.target.value;
@@ -1499,7 +867,6 @@ document.addEventListener("input", e => {
 });
 
 document.addEventListener("change", e => {
-  if (e.target.id === "aiDayMinus") { S.settings.aiMinus = e.target.checked; touchHabits(); return; }
   if (e.target.id !== "bkFile" || !e.target.files[0]) return;
   const reader = new FileReader();
   reader.onload = () => { sheet.text = String(reader.result || ""); sheet.msg = "Datei geladen. Tippe auf Einlesen."; sheet.err = ""; renderSheet(); };

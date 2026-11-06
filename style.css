@@ -455,6 +455,27 @@ textarea.input { padding: 10px 14px; min-height: 96px; font-size: 16px; font-wei
 details.sent summary { font-size: 14px; font-weight: 800; color: #0b7fbd; cursor: pointer; }
 details.sent pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 13px; background: var(--card); border-radius: 12px; padding: 10px; margin: 8px 0 0; }
 
+/* Einfache Ansicht */
+.sum { position: relative; display: flex; align-items: center; gap: 12px; background: var(--sun); border-radius: var(--r-card); border-bottom: 4px solid var(--sun-edge); padding: 14px 14px 16px; }
+.sum-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.sum b { font-size: 24px; line-height: 1.1; font-weight: 900; letter-spacing: -.025em; }
+.sum p { font-size: 15px; font-weight: 800; }
+.sum .bar.on-card { background: rgba(45, 44, 43, .14); }
+.sum .bar i { background: var(--ink); }
+.sum .bar i::after { background: rgba(255, 255, 255, .22); }
+.sum .mascot { flex: none; width: 76px; height: 76px; }
+.sum.is-pop .mascot { animation: pop .42s cubic-bezier(.3, 1.6, .5, 1); }
+.streak { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 15px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.streak svg { width: 17px; height: 17px; color: var(--orange); }
+.habit-card { gap: 10px; padding: 14px; border-radius: var(--r-card); }
+.card-head { display: flex; align-items: center; gap: 10px; }
+.card-head .stat-name { flex: 1; min-width: 0; }
+.grid { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, minmax(0, 1fr)); grid-template-columns: repeat(18, minmax(0, 1fr)); gap: 3px; }
+.grid i { aspect-ratio: 1; border-radius: 3px; }
+.grid i:not([class*="c-"]) { background: #efebe6; }
+.grid i.is-future { background: transparent; }
+.grid i.is-now { outline: 2px solid var(--ink); outline-offset: -1px; }
+
 @keyframes pop { 0% { transform: scale(.82); } 60% { transform: scale(1.12); } 100% { transform: scale(1); } }
 @keyframes burst { to { transform: translate(var(--x), var(--y)) rotate(320deg); opacity: 0; } }
 @keyframes rise { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }

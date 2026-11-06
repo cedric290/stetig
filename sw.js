@@ -1,8 +1,8 @@
 // Stetig startet sofort aus dem Zwischenspeicher, auch bei schlechtem Netz.
 // Im Hintergrund holt die App die neueste Version und fragt dabei immer beim Server nach.
 // Sie gilt ab dem nächsten Öffnen.
-const CACHE = "stetig-v9";
-const ASSETS = ["./", "index.html", "style.css", "pwa.css", "app.js", "config.js", "library.js", "insights.js", "account.js", "ai.js", "register.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
+const CACHE = "stetig-v11";
+const ASSETS = ["./", "index.html", "style.css", "pwa.css", "app.js", "config.js", "library.js", "simple.js", "account.js", "register.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 const FONT_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"];
 
 self.addEventListener("install", e => {
